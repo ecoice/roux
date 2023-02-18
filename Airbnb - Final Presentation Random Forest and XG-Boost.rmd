@@ -1,0 +1,416 @@
+---
+title: "Airbnb Predict - Draft Report"
+author: "Sarah Chang"
+date: "2023-02-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,
+                      warning = FALSE,
+                      message = FALSE)
+
+library(pacman)
+p_load(tidyr)
+p_load(dplyr)
+p_load(readr)
+p_load(ggplot2)
+p_load(skimr)
+p_load(ggmap)
+p_load(GGally)
+p_load(factoextra)
+
+na_strings <- c("NA", "N/A", "<NA>")
+
+```
+
+
+```{r boston_detail, include = FALSE}
+# ======= Listing Detail Import ========
+# putting character in [ ] forces a character class or set FIXED = TRUE in "gsub", or escape it twice "\\$" 
+
+boston_import <- read_csv("boston-December-2022-detail-listings.csv", na = na_strings)
+
+boston_import$price <- as.numeric(as.character(gsub("[$]","",boston_import$price)))
+
+boston_import <- boston_import %>% mutate(host_response_rate = as.numeric(as.character(gsub("[%]","",host_response_rate))),
+                    host_acceptance_rate = as.numeric(as.character(gsub("[%]","",host_acceptance_rate))))
+                    # across(where(is.numeric), ~na_if(.,"<NA>")),
+                    # across(where(is.character), ~na_if(.,"N/A"))) 
+                    
+
+boston_import$calendar_last_scraped <- boston_import$calendar_last_scraped %>% as.POSIXct()
+boston_import$last_scraped <- boston_import$last_scraped %>% as.POSIXct()
+boston_import$host_since <- boston_import$host_since %>% as.POSIXct()
+boston_import$first_review <- boston_import$first_review %>% as.POSIXct()
+boston_import$last_review <- boston_import$last_review %>% as.POSIXct()
+
+boston_import %>% summary()
+
+boston_import$room_type <- factor(boston_import$room_type, levels = c("Hotel room", "Shared room", "Private room", "Entire home/apt"))
+
+boston_import <-
+  boston_import %>% mutate(
+    bedrooms = replace_na(bedrooms, 0),
+    beds = replace_na(beds, 0),
+    amenities = as.character(gsub('\"', "", amenities, fixed = TRUE)),
+    amenities = as.character(gsub("[", "", amenities, fixed = TRUE)),
+    amenities = as.character(gsub("]", "", amenities, fixed = TRUE))
+  )
+
+boston_import$amenities <- strsplit(boston_import$amenities,",")
+
+boston_import <- boston_import %>%
+  mutate(
+    NumAmenities = lengths(amenities),
+    Wifi = grepl("Wifi",amenities),
+    Pets_Allowed = grepl("Pets", amenities),
+    Self_Checkin = grepl("Self check-in", amenities),
+    Free_Parking = grepl("Free parking", amenities),
+    Kitchen = grepl("Kitchen", amenities),
+    Washer = grepl("Washer",amenities),
+    Dryer = grepl("Dryer", amenities),
+    Pool = grepl("Pool", amenities),
+    AirCon = grepl("Air conditioning", amenities))
+
+```
+
+```{r summary_metrics, include = FALSE}
+# 
+# boston <-
+#   boston_import %>% filter(
+#     room_type != "Hotel room",
+#     !is.na(last_review),
+#     !is.na(price),
+#     !is.na(host_response_rate),
+#     !is.na(host_acceptance_rate),
+#     !is.na(review_scores_value)
+#   ) %>% select(
+#     -name,
+#     -last_scraped,
+#     -listing_url,
+#     -source,
+#     -description,
+#     -neighborhood_overview,
+#     -id,
+#     -scrape_id,
+#     -picture_url,
+#     -host_id,
+#     -host_url,
+#     -host_name,
+#     -host_about,
+#     -neighbourhood,
+#     -host_thumbnail_url,
+#     -host_picture_url,
+#     -neighbourhood_group_cleansed,
+#     -bathrooms,
+#     -calendar_updated,
+#     -bathrooms,
+#     -calendar_last_scraped,
+#     -license,
+#     -amenities,
+#     -host_location,
+#     -host_neighbourhood
+#   ) %>% mutate(across(where(is_character), as_factor)) %>% mutate(across(where(is_logical),  ~
+#                                                                            . * 1))
+
+
+boston <- boston_import %>% filter(
+  room_type != "Hotel room",
+  !is.na(last_review),
+  !is.na(price),
+  !is.na(host_response_rate),
+  !is.na(host_acceptance_rate),
+  !is.na(review_scores_value)) %>% 
+  select(
+  price,
+  host_response_rate,
+  host_acceptance_rate,
+  host_is_superhost,
+  host_listings_count,
+  neighbourhood_cleansed,
+  accommodates,
+  # bedrooms,
+  NumAmenities,
+  Wifi,
+  Pets_Allowed,
+  Self_Checkin,
+  Free_Parking,
+  Kitchen,
+  Washer,
+  # Dryer,
+  Pool,
+  AirCon,
+  room_type, 
+  property_type,
+  minimum_nights,
+  number_of_reviews,
+  review_scores_rating,
+  instant_bookable,
+  # review_scores_cleanliness,
+  # review_scores_accuracy,
+  # review_scores_communication,
+  # review_scores_checkin,
+  # review_scores_location,
+  # review_scores_value
+) %>% mutate(across(where(is.character), as.factor)) %>% mutate(across(where(is.logical),  ~
+                                                                         . * 1))
+# any(sapply(boston, is.finite))
+# 
+# boston %>% summary()
+
+
+neighbourhood <- boston %>% distinct(neighbourhood_cleansed)
+neighbourhood$neighbourhood <- 1:nrow(neighbourhood)
+
+property.type <- boston %>% distinct(property_type)
+property.type$property.type <- 1:nrow(property.type)
+
+room.type <- boston %>% distinct(room_type)
+room.type$room.type <- 1:nrow(room.type)
+
+boston <- inner_join(boston, neighbourhood, by = "neighbourhood_cleansed")
+boston <- inner_join(boston, property.type, by = "property_type")
+boston <- inner_join(boston, room.type, by = "room_type")
+boston <- boston %>% select(-neighbourhood_cleansed, -room_type, -property_type)
+
+```
+
+
+```{r include = FALSE}
+boston %>% mutate(log_price = log(price)) %>% 
+  ggplot(mapping = aes(accommodates, log_price)) +
+  geom_boxplot(aes(group = accommodates, fill = accommodates))
+
+boston_import %>% ggplot()+
+  geom_bar(aes(property_type)) +
+  coord_flip()
+
+boston_import %>% group_by(property_type) %>% summarise(count = n()) %>% arrange(desc(count))
+
+
+```
+
+
+## Introduction
+
+Airbnb hosts have to consider several factors in the determination of the best/appropriate price for the listing. Using the listings.csv from  [Inside Airbnb](http://insideairbnb.com/get-the-data), data was scraped and compiled on December 21, 2022. After pre-processing and cleaning the data for model development, the final data set contains `r nrow(boston)` observations across `r length(boston)` variables. In this report, three methods (Random Forest, K-Means, and Logistic Regression) will be utilized to determine whether the listing price can be predicted by a subset of the following features:
+
+`r boston[-1] %>% names()`
+
+## Correlation
+
+Prior to training models, plotting a correlation of the features can give some insights on whether there might be any dependent features within the subset to be used for model training and testing. It's obvious that the review scores are correlated, but number of bedrooms and number of people that can be accommodated also have some correlation.
+
+
+```{r Correlations}
+p_load(corrplot)
+p_load(fastDummies)
+
+# boston_dum <- dummy_cols(boston, remove_first_dummy = TRUE,remove_selected_columns = TRUE)
+
+boston_cor <- cor(boston)
+corrplot(boston_cor,tl.pos = NULL,
+         type = "lower",
+  tl.cex = .7,
+  tl.col = "black",
+  tl.offset = 0.4,
+  cl.ratio = 0.1, tl.srt = 5,
+  number.cex = 1,
+  number.font = 2,
+  number.digits = NULL,
+  mar = c(0,0,1,0),
+  title = "Correlation Plot of Major Features of Boston Airbnbs")
+
+```
+
+
+```{r constants}
+seed <- 100
+train_data_proportion = 0.8
+```
+
+```{r test_train}
+
+set.seed(seed)
+# get row numbers
+train <- sample(1:nrow(boston),
+                size = ceiling(train_data_proportion * nrow(boston)),
+                replace = FALSE)
+# get training & testing datasets
+train_boston <- boston[train, ]
+test_boston <- boston[-train, ]
+
+
+```
+
+## Feature Selection and Random Forest
+
+Unrelated columns from the Boston Airbnb data set such as identification numbers, URLs, and unparsable text columns were removed from the feature selection process. Unfortunately, Random Forest limits categorical variables to <53 so a few columns such as the host location and host neighborhood, which returned more than 53 categories, were removed for simplicity in feature selection. In total, 50 features remain to conduct feature selection of importance for the response variable of *price*. Amenities shows up in the original dataset as a atypically formatted character list. From the [Airbnb Resource center](https://www.airbnb.com/resources/hosting-homes/a/the-best-amenities-to-offer-right-now-203), the top 10 amenities identified were:
+
+- Pool
+- Wifi
+- Kitchen
+- Free parking
+- Jacuzzi
+- Washer/Dryer
+- AC
+- Self Check-in
+- Laptop-Friendly Workspace
+- Pets allowed
+
+As there are many options to choose from for amenities, these top 10 were selected to be additional features, where listings are identified as having or not having those amenities.
+
+Since *price* is a linear variable, the randomForest function will auto assign dummy variables to categorical and factor features and setting the model type to regression will return the increase in MSE of the predictions (%IncMSE) as a result of each variable being shuffled through the building of the forest. The higher the Increase in MSE, the more important the predictor. In this case, the random forest model suggests that the neighborhood, the number of people a listing can accommodate, and the number of bedrooms are the most important features. The plot of number of trees to error rate shows that a forest of between 80-90 trees appears to minimize the error of predicted price values. 
+
+
+```{r randomforest}
+
+library(randomForest)
+
+forest <- randomForest(price ~ .,
+                       importance = TRUE,
+                       data = train_boston,
+                       proximity = TRUE,
+                       type = "regression")
+
+plot(forest)
+
+forest
+
+```
+
+
+```{r randomforest_imp}
+imp <- forest$importance[, 2]
+imp_data <- matrix(imp, nrow=28, byrow=TRUE)
+
+importance(forest)
+varImpPlot(forest)
+```
+
+```{r}
+predicted <- predict(object = forest,
+                     newdata = test_boston[-1])
+
+actual <- data.frame(value=test_boston$price)
+actual$tag <- 'Actual'
+actual <- cbind(Index = rownames(actual), actual)
+rownames(actual) <- NULL
+
+predictedplot <- data.frame(value=na.omit(predicted))
+predictedplot$tag <- 'Predicted'
+predictedplot <- cbind(Index = rownames(predictedplot),predictedplot)
+rownames(predictedplot) <- NULL
+
+plot <- rbind(predictedplot,actual)
+
+ggplot(plot, mapping = aes(Index, value, group = tag)) +
+  geom_line(aes(color = tag))
+
+
+rsq <- function (x, y) cor(x, y) ^ 2
+
+```
+
+The model can then be used to predict values and as this is not a classification problem, no confusion matrix is used. Comparing the predicted prices to the actual prices using root mean squared error, the RMSE of the predicted values against the Boston Airbnb test data set is `r sqrt(mean((test_boston$price - predicted)^2))` and the R^2 is `r rsq(predicted,test_boston$price)`. The model is not great, but it's actually not the worst.
+
+
+## Extreme Gradient Boosting (XG-Boost)
+
+The random forest model can be compared with an XG-Boost model, another decision-tree based supervised learning model, to predict the price of Boston Airbnb listings. A model with 30 iterations is built on the training data.
+
+```{r}
+p_load(xgboost)
+p_load(caret)
+p_load(DiagrammeR)
+
+xg_model <- xgboost(data = as.matrix(train_boston[-1]),
+                    label = train_boston$price,
+                    objective = "reg:squarederror",
+                    max_depth = 2,
+                    nthread = 2,
+                    nrounds = 30,
+                    early_stopping_rounds = 2)
+
+summary(xg_model)
+```
+
+```{r}
+
+# predicted <- pred_xgb > 0.5
+# actual <- test_boston$price
+
+pred_xgb <- predict(object = xg_model, newdata= as.matrix(test_boston[-1]))
+
+yhat <- pred_xgb
+y <- as.matrix(test_boston[, 1])
+postResample(yhat, y)
+```
+The model performs slightly worse than the random forest model at predicting price in Boston Airbnb listings.
+
+To understand the effectiveness of the regression model, the residuals can be plotted, suggesting that this is an appropriate model to apply to this type of data set. There are some outliers, but the residuals are generally even across the full range of listings.
+
+```{r}
+
+r <- y - yhat
+plot(r, ylab = "residuals", main = "XGBoost Model Residuals")
+
+
+```
+
+Plotting the actual vs predicted price values however shows that the data is highly skewed. This is noted in the data and improvements to this could be improved by removing major outliers -- listings that are extremely overvalued.
+
+```{r}
+plot(y,
+     yhat,
+     xlab = "actual",
+     ylab = "predicted",
+     main = "XGBoost Actual vs Predicted")
+abline(lm(yhat ~ y))
+```
+
+Using the DiagrammR package, the first three trees can be plotted for visual review and accommodates dominates the initial splits for these first trees. Since the number of people a listing can accommodates is such a largely influential factor, it's possible to delve a little deeper into the features by splitting accommodates into groups or removing it to see the influence of other features on listing price. XG-Boost produces a similar breakdown of feature importance as random forest.
+
+```{r}
+#plot first 3 trees of model
+xgb.plot.tree(model = xg_model, trees = 0:2)
+
+importance_matrix <- xgb.importance(model = xg_model)
+xgb.plot.importance(importance_matrix, xlab = "Feature Importance")
+
+```
+
+Lastly, the predicted vs actual prices of Boston Airbnb listings made by XG-Boost can be compared. The average predicted price is higher than the average actual price. 
+
+```{r}
+# mean((y - yhat)^2) #mse - Mean Squared Error
+# 
+# caret::RMSE(y, yhat) #rmse - Root Mean Squared Error
+
+# y_test_mean = mean(y)
+# # Calculate total sum of squares
+# tss <-  sum((y - y_test_mean)^2 )
+# # Calculate residual sum of squares
+# rss <- sum((r)^2)
+# # Calculate R-squared
+# rsq  <-  1 - (rss/tss)
+# cat('The R-square of the test data is ', round(rsq,3), '\n')
+
+x = 1:length(y)                   # visualize the model, actual and predicted data
+plot(x, y, col = "red", type = "l")
+lines(x, yhat, col = "blue", type = "l")
+legend(x = 1, y = 900,  legend = c("original test_y", "predicted test_y"), 
+       col = c("red", "blue"), box.lty = 1, cex = 0.8, lty = c(1,1))
+title(main = "XGBoost Predicted Airbnb Boston Prices",
+      ylab = "Price",
+      xlab = "Listing")
+
+# 100*(mean(yhat) - mean(y))/mean(y)
+```
+
+The medians show significant outlier influence on predicted prices, with a median predicted value of \$`r round(median(yhat),0)` and a median actual actual price of \$`r median(y)`
+
+## Conclusion
+
+Both Random Forest and XG-Boost perform similarly but the random forest model resulted in a higher R^2 value, indicating improved ability to predict Boston Airbnb listing prices. These models are representative of listing prices in December, which may be a low point in the Boston tourism market, resulting in suppressed prices. Further analyses may benefit from adjusting the feature selection for model development and testing the model predictive power by removing outliers and out-sized feature influences.
